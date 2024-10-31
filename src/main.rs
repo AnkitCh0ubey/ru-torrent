@@ -10,11 +10,18 @@ fn decode_bencoded_value(encoded_value: &str) -> serde_json::Value {
     if encoded_value.chars().next().unwrap().is_digit(10) {
         // Example: "5:hello" -> "hello"
         let colon_index = encoded_value.find(':').unwrap();
-        let number_string = &encoded_value[..colon_index];
-        let number = number_string.parse::<i64>().unwrap();
-        let string = &encoded_value[colon_index + 1..colon_index + 1 + number as usize];
+        //let number_string = &encoded_value[..colon_index];
+        //let _number = number_string.parse::<i64>().unwrap();
+        let string = &encoded_value[colon_index + 1..];
         return serde_json::Value::String(string.to_string());
-    } else {
+    } 
+    else if encoded_value.chars().next().unwrap().is_alphabetic() {
+        let len = encoded_value.len();
+        let num_string = &encoded_value[1..len-1];
+        let number = num_string.parse::<i64>().unwrap();
+        serde_json::Value::Number(number.into())
+    }
+    else {
         panic!("Unhandled encoded value: {}", encoded_value)
     }
 }
