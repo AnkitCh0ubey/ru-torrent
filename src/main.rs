@@ -1,10 +1,11 @@
 use anyhow::Context;
 use serde_bencode;
 use serde_json;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use hashes::Hashes;
 use clap::{Parser, Subcommand};
+use sha1::{Sha1, Digest};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -22,7 +23,7 @@ enum Command {
 
 
 /// A Metainfo file is also known as .torrent file
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone,Serialize, Deserialize)]
 struct Torrent {
     announce: String,
  
@@ -30,7 +31,7 @@ struct Torrent {
 }
 
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone,Serialize, Deserialize)]
 struct Info{
     /// The suggested name to store the file (or directory)
     name: String,
@@ -41,7 +42,7 @@ struct Info{
     /// except for possibly the last one which may be truncated. piece length is almost always a power of two, 
     /// most commonly 2^18 = 256k (BitTorrent prior to version 3.2 uses 2^20 =  1M as default).
     #[serde(rename = "piece length")]
-    plength: usize,
+    piece_length: usize,
     
     /// each entry of 'pieces' is the SHA1 hash of the piece at the corresponding index. 
     pieces: Hashes,
@@ -51,7 +52,7 @@ struct Info{
 }
 
 /// There is a key length or a key files, but not both or neither.  
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 enum Keys{
     /// If length is present then the dowmload represents a single file
@@ -66,7 +67,7 @@ enum Keys{
     MultiFile { files: Vec<File> },
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone,Serialize, Deserialize)]
 struct File {
     /// The length for this file, in bytes.
     length: usize,
@@ -74,6 +75,94 @@ struct File {
     /// Subsidiary name for this file, the last of which is actual file name. (a zero length list in an error case)
     path: Vec<String>,
 }
+
+
+// Usage: your_bittorrent.sh decode "<encoded_value>"
+fn main() -> anyhow::Result<()>{
+    let args = Args::parse();
+    match args.command {
+        Command::Decode { value} => {
+            //Since the serde_bencode was failing previous test cases, we brought back the original parser to help parse it 
+            let v = decode_bencoded_value(&value).0; 
+            println!("{v}");
+        }
+        Command::Info { torrent } => {
+            let dot_torrent = std::fs::read(torrent).context("read torrent fole")?;
+            let t: Torrent = serde_bencode::from_bytes(&dot_torrent).context("decode torrent")?;
+            eprintln!("{t:?}");
+            println!("Tracker URL: {}", t.announce);
+            if let Keys::SingleFile { length } = t.info.keys{
+                println!("Length: {length}");
+            } else {
+                todo!()
+            }
+            // extracting info dictionary, bencoding it and then calculating the sha1 of the bencoded dictionary
+            let info_encoded = serde_bencode::to_bytes(&t.info).context("re-encode info section")?;
+            let mut hasher = Sha1::new();
+            hasher.update(&info_encoded);
+            let info_hash =hasher.finalize();
+            println!("Info Hash: {}", hex::encode(&info_hash) );
+
+        }
+    }
+    
+    Ok(())
+  
+}
+
+mod hashes {
+    use serde::de::{self, Visitor, Deserialize, Deserializer};
+    use serde::ser::{Serialize, Serializer, SerializeSeq, SerializeMap};
+    use core::fmt;
+        
+
+    #[derive(Debug, Clone)]
+    pub struct Hashes(pub Vec<[u8; 20]>);
+    #[derive(Debug, Clone)]
+    pub struct HashesVisitor;
+        
+    impl<'de> Visitor<'de> for HashesVisitor {
+        type Value = Hashes;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+            formatter.write_str("a list of 20-byte hashes")
+        }
+
+        fn visit_bytes<E>(self, v: &[u8]) -> Result<Self::Value, E>
+            where
+                E: de::Error, {
+            if v.len() % 20 != 0 {
+                return Err(E::custom(format!("invalid length {}", v.len())));
+            }
+            // TODO: use array_chunks when stable
+            Ok(Hashes(
+                v.chunks_exact(20)
+                .map(|slice_20| slice_20.try_into().expect("Guranteed to be of length 20"))
+                .collect(),
+            ))
+        }
+    }
+
+    impl<'de> Deserialize<'de> for Hashes{
+        fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: de::Deserializer<'de> 
+            {
+                deserializer.deserialize_bytes(HashesVisitor)
+            }
+    }
+
+    impl Serialize for Hashes{
+        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: Serializer,
+        {
+            let single_slice = self.0.concat();
+            serializer.serialize_bytes(&single_slice)
+        }
+    }
+}
+
 
 /// serde_bencode to serde_json::Value is cooked therefore we had to bring back our og parser
 #[allow(dead_code)]
@@ -124,76 +213,6 @@ fn decode_bencoded_value(encoded_value: &str) -> (serde_json::Value, &str) {
     _=>{}
     }
     panic!("Unhandled encoded value: {encoded_value}");
-}
-
-// Usage: your_bittorrent.sh decode "<encoded_value>"
-fn main() -> anyhow::Result<()>{
-    let args = Args::parse();
-    match args.command {
-        Command::Decode { value} => {
-            //Since the serde_bencode was failing previous test cases, we brought back the original parser to help parse it 
-            let v = decode_bencoded_value(&value).0; 
-            println!("{v}");
-        }
-        Command::Info { torrent } => {
-            let dot_torrent = std::fs::read(torrent).context("read torrent fole")?;
-            let t: Torrent = serde_bencode::from_bytes(&dot_torrent).context("decode torrent")?;
-            eprintln!("{t:?}");
-            println!("Tracker URL: {}", t.announce);
-            if let Keys::SingleFile { length } = t.info.keys{
-                println!("Length: {length}");
-            } else {
-                todo!()
-            }
-        }
-    }
-    
-    Ok(())
-
-    
-}
-
-mod hashes {
-use serde::de::{self, Visitor, Deserialize, Deserializer};
-use core::fmt;
-    
-
-#[derive(Debug, Clone)]
-pub struct Hashes(pub Vec<[u8; 20]>);
-#[derive(Debug, Clone)]
-pub struct HashesVisitor;
-    
-impl<'de> Visitor<'de> for HashesVisitor {
-    type Value = Hashes;
-
-    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-        formatter.write_str("a list of 20-byte hashes")
-    }
-
-    fn visit_bytes<E>(self, v: &[u8]) -> Result<Self::Value, E>
-        where
-            E: de::Error, {
-        if v.len() % 20 != 0 {
-            return Err(E::custom(format!("invalid length {}", v.len())));
-        }
-        // TODO: use array_chunks when stable
-        Ok(Hashes(
-            v.chunks_exact(20)
-            .map(|slice_20| slice_20.try_into().expect("Guranteed to be of length 20"))
-            .collect(),
-        ))
-    }
-}
-
-impl<'de> Deserialize<'de> for Hashes{
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-        where
-            D: de::Deserializer<'de> 
-        {
-            deserializer.deserialize_bytes(HashesVisitor)
-        }
-}
-
 }
 
 //Self made parser2.0
